@@ -6,6 +6,10 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [v3.8.0] - 2026-10-13
+
+Opt-in context export: other local tools can read each session's context fill from a small private JSON file.
+
 ### Added
 - Opt-in context export (`STATUSLINE_CTX_EXPORT=1`): each render atomically writes a private per-session JSON record (context fill, measured tokens, window size, whether the value is native, computed, held or a default, timestamp, model and Claude Code version) under `${XDG_STATE_HOME:-~/.local/state}/cc-statusline/ctx/`, for other local tools. Schema documented in the README. Records not rewritten for at least seven days are pruned by a best-effort sweep at most about once a day.
 
@@ -359,7 +363,8 @@ Initial public release. Imported from a private mackup repo where the script liv
 - Terminal tab title set from the topic or directory.
 - Width-aware truncation of K8s context, branch, and topic to keep line 1 under the soft limit before Claude Code's `cli-truncate` drops line 2.
 
-[Unreleased]: https://github.com/vtmocanu/cc-statusline/compare/v3.7.0...HEAD
+[Unreleased]: https://github.com/vtmocanu/cc-statusline/compare/v3.8.0...HEAD
+[v3.8.0]: https://github.com/vtmocanu/cc-statusline/compare/v3.7.0...v3.8.0
 [v3.7.0]: https://github.com/vtmocanu/cc-statusline/compare/v3.6.0...v3.7.0
 [v3.6.0]: https://github.com/vtmocanu/cc-statusline/compare/v3.5.1...v3.6.0
 [v3.5.1]: https://github.com/vtmocanu/cc-statusline/compare/v3.5.0...v3.5.1
