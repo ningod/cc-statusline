@@ -539,6 +539,26 @@ elif [ -n "$CTX_SNAP" ] && [ -e "$CTX_SNAP" ]; then
     rm -f "$CTX_SNAP" 2>/dev/null || true
 fi
 
+# ── OpenRouter session detection ─────────────────────────────────────────────
+# An OpenRouter session bills a DIFFERENT account than the claude.ai login still
+# sitting in ~/.claude.json, so below it: the 5h/7d claude.ai bars are
+# suppressed (they would show the residual claude.ai account's numbers),
+# claude-usage-fetch.sh is not spawned (it would ask api.anthropic.com with the
+# stored claude.ai login), and the OpenRouter KEY's own budget/spend replaces
+# them (see the OR cache block after the RL block).
+# Active ONLY when the session is really routed there: ANTHROPIC_BASE_URL points
+# at openrouter.ai (a local proxy forwarding to it is not detected) AND a
+# credential rides along in ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY. A bare
+# OPENROUTER_API_KEY (commonly exported for unrelated tools) or an
+# sk-or-* token without the base URL proves nothing: requests still land on
+# api.anthropic.com, so neither flips the mode. STATUSLINE_OR=0 disables the
+# whole feature (OR sessions then render without any usage segment).
+OR_MODE=0
+case "${ANTHROPIC_BASE_URL:-}" in
+    *openrouter.ai*)
+        [ -n "${ANTHROPIC_AUTH_TOKEN:-}${ANTHROPIC_API_KEY:-}" ] && OR_MODE=1 ;;
+esac
+
 # ── Shared per-user rate-limits cache ─────────────────────────────────────
 # Rate limits are account-wide, but Claude Code freezes the stdin rate_limits
 # object at each session's LAST API response. An idle session, re-rendered on
@@ -642,7 +662,14 @@ if [ "${STATUSLINE_RL_SHARE:-1}" != "0" ]; then
     fi
 fi
 
-if [ "${STATUSLINE_RL_SHARE:-1}" != "0" ] && [ "$GPT_EFFECTIVE_EARLY" != "1" ]; then
+# OpenRouter sessions skip this whole block: their claude.ai rate_limits are
+# the residual keychain account's numbers (see the OpenRouter detection block
+# above), and the spawned claude-usage-fetch would ask api.anthropic.com with
+# the stored claude.ai login, attributing OpenRouter-billed usage to whichever
+# claude.ai account is logged in locally. The OR cache block after this one
+# serves them instead.
+if [ "${STATUSLINE_RL_SHARE:-1}" != "0" ] && [ "$GPT_EFFECTIVE_EARLY" != "1" ] \
+   && [ "$OR_MODE" = "0" ]; then
     # Reap a tmp left by an interrupted write, while still emitting the crash
     # newline the top-of-file EXIT trap guarantees. RL_TMP is "" outside a write,
     # so this is a no-op on a clean crash; disarmed at the normal output path.
@@ -773,6 +800,74 @@ if [ "${STATUSLINE_RL_SHARE:-1}" != "0" ] && [ "$GPT_EFFECTIVE_EARLY" != "1" ]; 
     elif [ "$STDIN_RL" = "1" ]; then
         # No usable cache yet: seed it from stdin.
         _rl_write "$RL_CACHE" "$FIVE_PCT" "$STDIN_FR" "$SEVEN_PCT" "$STDIN_SR"
+    fi
+fi
+
+# ── OpenRouter key budget cache ─────────────────────────────────────────────
+# OpenRouter sessions read the KEY's own budget/spend instead of claude.ai
+# usage. /api/v1/key (fetched by claude-openrouter-fetch.sh in the background)
+# reports spend_usd/limit_usd/resets_at on the effective budget and
+# usage_daily; OpenRouter credits are USD 1:1 (verified against the budgets
+# block), so these are real dollars. Per-SESSION cost is not reachable with an
+# API key (the compat endpoint returns msg_* ids, not gen-*; /api/v1/activity
+# answers 403), so the statusline drops Claude Code's own list-price session
+# estimate in OR mode (it prices a glm the way Claude would, not what OpenRouter
+# bills) and shows the key's spend/daily instead.
+#
+# Cache line (written by claude-openrouter-fetch.sh, all integers; money in
+# cents, reset as epoch): SPEND|LIMIT|RESET|DAILY|FETCHED. LIMIT 0 = no key cap.
+# Read is fully guarded; a stale-but-valid line still displays (it beats
+# nothing — no stdin OR data exists) while the fetcher keeps it current.
+# Cache path is keyed by a cksum hash of the KEY (never the key itself), so
+# each OpenRouter key shares snapshots only with its own sessions.
+#
+# Env knobs: CC_STATUSLINE_OR_CACHE (cache path override, test isolation),
+# CC_STATUSLINE_OR_FETCH (fetcher path override), CC_STATUSLINE_OR_DATA
+# (fixture via the fetcher), STATUSLINE_OR_FETCH=0 (disable the fetcher),
+# STATUSLINE_OR=0 (disable the whole feature, set with the OR detection).
+OR_SPEND_CENT=""; OR_LIMIT_CENT=""; OR_RESET_TS=""; OR_DAILY_CENT=""
+if [ "$OR_MODE" = "1" ] && [ "${STATUSLINE_OR:-1}" != "0" ]; then
+    OR_TOK="${ANTHROPIC_AUTH_TOKEN:-}"
+    case "$OR_TOK" in sk-or-*) : ;; *) OR_TOK="${ANTHROPIC_API_KEY:-}"
+        case "$OR_TOK" in sk-or-*) : ;; *) OR_TOK="${OPENROUTER_API_KEY:-}" ;; esac ;; esac
+    OR_KEY_H=$(printf '%s' "$OR_TOK" | cksum | cut -d' ' -f1 || echo 0)
+    OR_CACHE="${CC_STATUSLINE_OR_CACHE:-$(_state_dir)/openrouter-${OR_KEY_H:-0}}"
+    if [ -f "$OR_CACHE" ]; then
+        IFS='|' read -r OR_SPEND_CENT OR_LIMIT_CENT OR_RESET_TS OR_DAILY_CENT OR_AT _ < "$OR_CACHE" 2>/dev/null || true
+        if ! { [[ "$OR_SPEND_CENT" =~ ^[0-9]{1,7}$ ]] && [[ "$OR_LIMIT_CENT" =~ ^[0-9]{1,7}$ ]] \
+            && [[ "$OR_RESET_TS"  =~ ^[0-9]{1,12}$ ]] && [[ "$OR_DAILY_CENT" =~ ^[0-9]{1,7}$ ]] \
+            && [[ "$OR_AT" =~ ^[0-9]{1,12}$ ]]; }; then
+            OR_SPEND_CENT=""; OR_LIMIT_CENT=""; OR_RESET_TS=""; OR_DAILY_CENT=""
+        fi
+    fi
+    # Spawn the background fetcher when the line is missing or aging (>=60s),
+    # gated by the same .fetching marker / .backoff pattern as the claude.ai
+    # fetcher (attempts throttled to one per minute per key, success or
+    # failure; backoff after an HTTP error).
+    OR_NOW="${CC_STATUSLINE_NOW:-$(date +%s)}"
+    [[ "$OR_NOW" =~ ^[0-9]{1,12}$ ]] || OR_NOW=0
+    OR_AGE=9999
+    if [ -f "$OR_CACHE" ] && [[ "$OR_AT" =~ ^[0-9]{1,12}$ ]]; then
+        OR_AGE=$((OR_NOW - OR_AT))
+        [ "$OR_AGE" -lt 0 ] && OR_AGE=9999
+    fi
+    OR_BACK=0
+    if [ -f "$OR_CACHE.backoff" ]; then
+        OR_BACK_AGE=$((OR_NOW - $(_file_mtime "$OR_CACHE.backoff")))
+        [ "$OR_BACK_AGE" -ge 0 ] && [ "$OR_BACK_AGE" -lt "$(_gate_int "${STATUSLINE_OR_BACKOFF:-300}" 300)" ] && OR_BACK=1
+    fi
+    OR_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    OR_FETCH="${CC_STATUSLINE_OR_FETCH:-${OR_SCRIPT_DIR:-$HOME/.local/share/cc-statusline}/claude-openrouter-fetch.sh}"
+    if [ "${STATUSLINE_OR_FETCH:-1}" != "0" ] && [ -x "$OR_FETCH" ] \
+        && [ "$OR_AGE" -ge 60 ] && [ "$OR_BACK" = "0" ]; then
+        OR_MARK="$OR_CACHE.fetching"
+        OR_MARK_AGE=9999
+        [ -f "$OR_MARK" ] && OR_MARK_AGE=$((OR_NOW - $(_file_mtime "$OR_MARK")))
+        if [ "$OR_MARK_AGE" -ge 60 ] || [ "$OR_MARK_AGE" -lt 0 ]; then
+            [ -L "$OR_MARK" ] || touch "$OR_MARK" 2>/dev/null || true
+            ( printf '%s' "$OR_TOK" \
+                | CC_STATUSLINE_OR_CACHE="$OR_CACHE" "$OR_FETCH" >/dev/null 2>&1 & )
+        fi
     fi
 fi
 
@@ -1175,28 +1270,31 @@ fi
 # ── Profile badge (opt-in: requires ~/.claude/profile-labels.json) ────────
 # Identifies which Claude Code account is logged in. Reads the active
 # account UUID directly from ~/.claude.json's .oauthAccount.accountUuid
-# (maintained by Claude Code itself; also swapped by tools like
-# claude-account-switcher). No network call, no Keychain access, fully
-# portable across macOS/Linux.
+# (maintained by Claude Code / claude-account-switcher). No network call, no
+# Keychain access, fully local. Sessions launched with CLAUDE_CODE_OAUTH_TOKEN
+# talk to a different account than ~/.claude.json, so when the rate-limits
+# account scan yields a token hash (RL_KEY) the badge keys to that instead.
+# No login at all renders the "none" badge (profiles entry "none" overrides it).
 #
-# Sessions launched with CLAUDE_CODE_OAUTH_TOKEN don't update ~/.claude.json,
-# so the UUID there would mislabel them. When the rate-limits account scan
-# detected a token (RL_KEY, the cksum hash above), the badge is looked up by
-# that hash instead: add a profiles entry keyed by the hash to label a token
-# account. Requires STATUSLINE_RL_SHARE enabled (the scan runs there).
+# OpenRouter is a MODIFIER on top of the login, not a replacement: when OR_MODE
+# is active (see the detection block) a "+openrouter" suffix (profiles entry
+# "openrouter" gives its label/color) is appended to the login label, so
+# "personal+openrouter" says both who is logged in and where requests go.
 #
-# Disabled if STATUSLINE_PROFILE=0, the mapping file is absent, or
-# `enabled: false` is set in the JSON.
+# Disabled if STATUSLINE_PROFILE=0 or the mapping file is absent.
 PROFILE_LABEL=""
 PROFILE_COLOR=""
+PROFILE_OR_LABEL=""
+PROFILE_OR_COLOR=""
 PROFILE_FILE="${HOME}/.claude/profile-labels.json"
 CLAUDE_STATE="${HOME}/.claude.json"
-if [ "${STATUSLINE_PROFILE:-1}" != "0" ] && [ -r "$PROFILE_FILE" ] && [ -r "$CLAUDE_STATE" ]; then
+if [ "${STATUSLINE_PROFILE:-1}" != "0" ] && [ -r "$PROFILE_FILE" ]; then
     # Note: use `!= false` not `// true` — jq's `//` treats false as absent,
     # so `.enabled // true` would return true even when enabled is false.
     PROFILE_ENABLED=$(jq -r '.enabled != false' "$PROFILE_FILE" 2>/dev/null)
     if [ "$PROFILE_ENABLED" = "true" ]; then
-        UUID=$(jq -r '.oauthAccount.accountUuid // empty' "$CLAUDE_STATE" 2>/dev/null)
+        UUID=""
+        [ -r "$CLAUDE_STATE" ] && UUID=$(jq -r '.oauthAccount.accountUuid // empty' "$CLAUDE_STATE" 2>/dev/null)
         BADGE_ID="${RL_KEY:-$UUID}"
         if [ -n "$BADGE_ID" ]; then
             PROFILE_LABEL=$(jq -r --arg u "$BADGE_ID" '.profiles[$u].label // ""' "$PROFILE_FILE" 2>/dev/null)
@@ -1207,6 +1305,13 @@ if [ "${STATUSLINE_PROFILE:-1}" != "0" ] && [ -r "$PROFILE_FILE" ] && [ -r "$CLA
                 PROFILE_LABEL="${BADGE_ID:0:6}?"
                 PROFILE_COLOR="gray"
             fi
+        else
+            PROFILE_LABEL=$(jq -r '.profiles["none"].label // "none"' "$PROFILE_FILE" 2>/dev/null)
+            PROFILE_COLOR=$(jq -r '.profiles["none"].color // "gray"' "$PROFILE_FILE" 2>/dev/null)
+        fi
+        if [ "$OR_MODE" = "1" ]; then
+            PROFILE_OR_LABEL=$(jq -r '.profiles["openrouter"].label // "openrouter"' "$PROFILE_FILE" 2>/dev/null)
+            PROFILE_OR_COLOR=$(jq -r '.profiles["openrouter"].color // "purple"' "$PROFILE_FILE" 2>/dev/null)
         fi
     fi
 fi
@@ -1223,6 +1328,18 @@ case "${PROFILE_COLOR:-}" in
     cyan)       PROFILE_FG="\033[38;2;120;200;215m" ;;
     gray|grey|"") PROFILE_FG="\033[38;2;170;170;170m" ;;
     *)          PROFILE_FG="\033[38;2;170;170;170m" ;;
+esac
+# OpenRouter modifier suffix: "+<label>" in its own color, appended to the login badge
+PROFILE_OR_LABEL="${PROFILE_OR_LABEL//[$'\001'-$'\037\177']/}"
+case "${PROFILE_OR_COLOR:-}" in
+    red)        PROFILE_OR_FG="\033[38;2;225;100;100m" ;;
+    orange)     PROFILE_OR_FG="\033[38;2;245;165;80m"  ;;
+    yellow)     PROFILE_OR_FG="\033[38;2;225;200;100m" ;;
+    green)      PROFILE_OR_FG="\033[38;2;150;210;150m" ;;
+    blue)       PROFILE_OR_FG="\033[38;2;110;170;230m" ;;
+    cyan)       PROFILE_OR_FG="\033[38;2;120;200;215m" ;;
+    gray|grey)  PROFILE_OR_FG="\033[38;2;170;170;170m" ;;
+    *)          PROFILE_OR_FG="\033[38;2;200;140;220m" ;;
 esac
 
 # ── Nerd Font icons ───────────────────────────────────────────────────────
@@ -1766,8 +1883,12 @@ esac
 # transcript-derived "N.NN cr" estimate when available instead. Both forms are
 # built here so measure_cols includes their real width. STATUSLINE_COST controls
 # only Claude dollars; STATUSLINE_GPT_CREDITS controls GPT credits.
+# Suppressed in OpenRouter sessions: Claude Code computes this figure locally
+# from token counts at Anthropic list price, so for a third-party model behind
+# a gateway it prices the request the way Claude would, not what OpenRouter
+# bills. The OR budget/daily segments on line 2 carry the real dollars instead.
 COST_SEG=""
-if [ "$GPT_ACTIVE" != "1" ] && [ "${STATUSLINE_COST:-1}" != "0" ] \
+if [ "$GPT_ACTIVE" != "1" ] && [ "${STATUSLINE_COST:-1}" != "0" ] && [ "$OR_MODE" = "0" ] \
     && [ "$(LC_ALL=C awk -v c="$COST_USD" 'BEGIN{print (c>0)?1:0}' 2>/dev/null)" = "1" ]; then
     COST_FMT=$(LC_ALL=C awk -v c="$COST_USD" 'BEGIN{ if (c>0 && c<0.005) printf "<0.01"; else printf "%.2f", c }' 2>/dev/null)
     COST_SEG=" ${DOT2} ${L2_TXT}\$${COST_FMT}${B2}"
@@ -1784,7 +1905,7 @@ elif [ "$GPT_ACTIVE" = "1" ] && [ -n "$GPT_CREDITS_UNITS" ]; then
 fi
 
 L2C="${RST}${CAP2_L}${BG2} ${L2_TXT}${NF_MODEL} ${MODEL} ${DOT2} ${EFFORT_CLR}${EFFORT}${B2}"
-[ -n "$PROFILE_LABEL" ] && L2C+=" ${DOT2} ${PROFILE_FG}${PROFILE_LABEL}${B2}"
+[ -n "$PROFILE_LABEL" ] && L2C+=" ${DOT2} ${PROFILE_FG}${PROFILE_LABEL}${PROFILE_OR_LABEL:+${L2_DIM}+${PROFILE_OR_FG}${PROFILE_OR_LABEL}}${B2}"
 L2C+=" ${SEP2} ${L2_TXT}${NF_CLOCK} ${TIME_CLR}${TIME}${B2}${COST_SEG} ${SEP2} ${CTX_BAR} ${CTX_CLR}${PCT}%${B2} ${L2_TXT}of ${CTX_SIZE_K}k"
 
 # ── Rate-limit detail candidates (full / compact / minimal) ────────────────
@@ -2244,7 +2365,9 @@ _apply_phone_l2() {
         # can say "this is truncated, shorten your label".
         local lbl="$PROFILE_LABEL"
         [ "$(_clen "$lbl")" -gt 8 ] && lbl="$(_head_cp "$lbl" 7)…"
-        L2C+=" ${PROFILE_FG}${lbl}${B2}"
+        local orseg=""
+        [ -n "$PROFILE_OR_LABEL" ] && orseg="${L2_DIM}+${PROFILE_OR_FG}or"
+        L2C+=" ${PROFILE_FG}${lbl}${orseg}${B2}"
         PH_SEP=" ${SEP2}"
     fi
     CACHE_SEG=""; TIMER_SEG=""
@@ -2314,6 +2437,54 @@ _apply_phone_l2() {
     fi
 }
 [ "$LAYOUT" = "phone" ] && _apply_phone_l2
+
+# ── OpenRouter override: key budget replaces the claude.ai tiers ──────────
+# Runs after both tier builds (wide above, phone in _apply_phone_l2): in an
+# OpenRouter session the claude.ai 5h/7d strings — and on a phone their ctx
+# fallback — never display; the OR key's own budget/spend does instead, fed
+# by the same widest-that-fits selector. Grammar mirrors the 5h/7d tiers
+# (bar + colored pct at FULL, countdown kept through COMPACT, bare dollars at
+# MINIMAL), with today's key spend riding only the widest tier. No valid cache
+# line yet (fresh OR session before the first fetch lands): every tier stays
+# empty rather than falling back to claude.ai numbers, exactly like the
+# account-specific token path in the RL block above.
+if [ "$OR_MODE" = "1" ]; then
+    RATE_FULL=""; RATE_COMPACT=""; RATE_MINIMAL=""
+    if [ -n "${OR_SPEND_CENT:-}" ]; then
+        OR_SPEND_STR=$(awk -v c="$OR_SPEND_CENT" 'BEGIN{printf "%.2f", c/100}' 2>/dev/null)
+        OR_DAILY_STR=$(awk -v c="$OR_DAILY_CENT" 'BEGIN{printf "%.2f", c/100}' 2>/dev/null)
+        OR_PCT=""; OR_BAR_SEG=""; OR_PCT_SEG=""
+        if [ "$OR_LIMIT_CENT" -gt 0 ] 2>/dev/null; then
+            OR_PCT=$((OR_SPEND_CENT * 100 / OR_LIMIT_CENT))
+            [ "$OR_PCT" -gt 100 ] && OR_PCT=100
+            OR_PCT_CLR=$(pct_color "$OR_PCT")
+            OR_BAR_SEG="${OR_PCT_CLR}$(make_bar "$OR_PCT" 5 "$OR_PCT_CLR" "$L2_DIM")${B2} "
+            OR_PCT_SEG="${OR_PCT_CLR}${OR_PCT}%${B2} "
+        fi
+        # Tier ladder mirrors the claude.ai one: FULL keeps bar + pct + budget
+        # + reset countdown + today's spend, COMPACT sheds the countdowns, and
+        # MINIMAL is the bare budget the ladder can never shed below — with the
+        # bar and pct living in FULL/COMPACT only, a mid-width viewport still
+        # fits the bare dollars instead of dropping the whole segment.
+        OR_TIME=$(format_reset "$OR_RESET_TS")
+        OR_TIME_SEG=""
+        [ -n "$OR_TIME" ] && OR_TIME_SEG=" ${L2_DIM}↻${L2_TXT}${OR_TIME}${B2}"
+        OR_TODAY_SEG=" ${DOT2} ${L2_TXT}\$${OR_DAILY_STR} today${B2}"
+        # A key with no cap (limit unset) shows its spend without the "/$limit"
+        # tail; the bar/pct need a limit to mean anything and stay empty there.
+        if [ "$OR_LIMIT_CENT" -gt 0 ] 2>/dev/null; then
+            OR_LIMIT_STR=$(awk -v c="$OR_LIMIT_CENT" 'BEGIN{printf "%.0f", c/100}' 2>/dev/null)
+            OR_BUDGET=" ${SEP2} ${L2_TXT}or ${OR_BAR_SEG}${OR_PCT_SEG}${L2_TXT}\$${OR_SPEND_STR}/\$${OR_LIMIT_STR}${B2}"
+            OR_MINIMAL=" ${SEP2} ${L2_TXT}or \$${OR_SPEND_STR}/\$${OR_LIMIT_STR}${B2}"
+        else
+            OR_BUDGET=" ${SEP2} ${L2_TXT}or \$${OR_SPEND_STR}${B2}"
+            OR_MINIMAL="$OR_BUDGET"
+        fi
+        RATE_FULL="${OR_BUDGET}${OR_TIME_SEG}${OR_TODAY_SEG}"
+        RATE_COMPACT="$OR_BUDGET"
+        RATE_MINIMAL="$OR_MINIMAL"
+    fi
+fi
 
 # ── One batch measurement: full L1 + L2 base + every L2 candidate ──────────
 # measure_cols takes N strings and emits N codepoint counts in a single perl

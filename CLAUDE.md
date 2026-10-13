@@ -29,6 +29,7 @@ cc-statusline/
 ├── statusline.sh                     Main script (called by Claude Code, reads JSON from stdin, outputs 2 lines of ANSI)
 ├── claude-status-fetch.sh            Background helper for Statuspage-compatible JSON. Defaults to Claude's summary; also reads GitHub's summary and, for opt-in GPT sessions, the exact OpenAI `Codex API` component into separate caches
 ├── claude-usage-fetch.sh             Background helper, fetches /api/oauth/usage with the session's own credential, writes the per-account rate-limits cache (authoritative 5-field line)
+├── claude-openrouter-fetch.sh        Background helper, fetches the OpenRouter key's own spend/limit (/api/v1/key) in OpenRouter sessions; key on stdin only
 ├── codex-usage-fetch.sh              Opt-in background helper, reads ChatGPT plan limits through the official Codex app server and writes the separate GPT rate-limits cache (one or both windows)
 ├── gpt-credits-fetch.sh              Opt-in transcript-streaming GPT-5.6 Sol ChatGPT credit-equivalent estimator; scans main + subagents, deduplicates response IDs, writes a private session-keyed cache
 ├── cc-statusline-update-fetch.sh     Background helper, polls the GitHub "latest release" endpoint at most hourly, writes the per-user update-check cache (one line: the tag). Drives the line-1 right-aligned "⇡ X.Y.Z" update indicator (STATUSLINE_UPDATE_CHECK, on by default, shown only when the tag is newer than VERSION)

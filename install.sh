@@ -126,6 +126,13 @@ install -m 0755 "$STAGE_DIR/claude-usage-fetch.sh"  "$INSTALL_DIR/claude-usage-f
 install -m 0755 "$STAGE_DIR/codex-usage-fetch.sh"   "$INSTALL_DIR/codex-usage-fetch.sh"
 install -m 0755 "$STAGE_DIR/gpt-credits-fetch.sh"   "$INSTALL_DIR/gpt-credits-fetch.sh"
 install -m 0755 "$STAGE_DIR/cc-statusline-update-fetch.sh" "$INSTALL_DIR/cc-statusline-update-fetch.sh"
+# The OpenRouter budget fetcher is optional: tags that predate it simply have
+# none, and a stale copy from a newer install is removed on rollback.
+if [ -f "$STAGE_DIR/claude-openrouter-fetch.sh" ]; then
+    install -m 0755 "$STAGE_DIR/claude-openrouter-fetch.sh" "$INSTALL_DIR/claude-openrouter-fetch.sh"
+else
+    rm -f "$INSTALL_DIR/claude-openrouter-fetch.sh"
+fi
 # Older tags predate the chooser. Preserve rollback to those tags and remove
 # a newer chooser that would otherwise target their unsupported renderer.
 if [ -f "$STAGE_DIR/cc-statusline-theme" ]; then

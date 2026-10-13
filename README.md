@@ -194,6 +194,9 @@ The key is the project root (resolved via `git rev-parse --show-toplevel`); the 
 | `CC_STATUSLINE_RL_KEY` | auto | Override the rate-limits cache account key (a label like `work`). Normally auto-detected from the session's `CLAUDE_CODE_OAUTH_TOKEN` (hashed, read from the parent `claude` process's exec-time environment since Claude Code consumes the variable). Set empty to force the shared unsuffixed cache. |
 | `STATUSLINE_GLYPH_MARGIN` | `3` | Columns reserved for Nerd Font glyphs that render double-width in some terminals. Set to `0` on a known mono-width font to reclaim them. |
 | `STATUSLINE_PROFILE` | `1` | Set to `0` to hide the account/profile badge (see below). |
+| `STATUSLINE_OR` | `1` | Set to `0` to disable OpenRouter session handling entirely (see [OpenRouter sessions](#openrouter-sessions)). |
+| `STATUSLINE_OR_FETCH` | `1` | Set to `0` to disable the background OpenRouter key-budget fetcher (`claude-openrouter-fetch.sh`). |
+| `STATUSLINE_OR_BACKOFF` | `300` | Seconds the OpenRouter fetcher stays quiet after an HTTP error from openrouter.ai. |
 | `STATUSLINE_CTX_EXPORT` | `0` | Set to `1` to write a per-session context record for other local tools (see [Context export](#context-export)). |
 | `CC_STATUSLINE_CTX_EXPORT_DIR` | `${XDG_STATE_HOME:-~/.local/state}/cc-statusline/ctx` | Override the context export directory. |
 | `STATUSLINE_DEBUG` | unset | Set to `1` to write stderr to `/tmp/statusline-debug.log`. |
@@ -330,6 +333,10 @@ Opt-in: create `~/.claude/profile-labels.json` with a `profiles` map and the bad
 }
 ```
 
+The badge always names the login. With no login at all it reads `none`; give that state its own label or color with a `"none"` entry in `profiles`. An unknown id renders as a short `abc123?` hint so you know which key to add.
+
+When the session is routed through OpenRouter (see [OpenRouter sessions](#openrouter-sessions)), a `+openrouter` suffix is appended to the login (`work+openrouter`, shortened to `work+or` on the phone layout). Label and color of the suffix come from an optional `"openrouter"` entry in `profiles`; the default is `openrouter` in purple.
+
 ### Session name and title
 
 Line 1 leads with two identifiers Claude Code provides natively, so neither needs a hook or an API call:
@@ -353,6 +360,12 @@ When more than one Claude Code session works in the same repository, line 1 show
 Zero counts are left out, and the whole segment is hidden when a session is alone in its repo. The count your own session belongs to is bracketed (`[⚙N]`, `[◷N]` or `[○N]`), so each session shows where it stands; it is never counted as `?`, since you are already looking at it. "Same repo" follows `git worktree list`, so sessions in linked worktrees at other paths count too. Codex threads attached as session peers are not counted; they are Codex runs, not Claude Code sessions.
 
 The states come from Claude Code's per-session registry (`~/.claude/sessions/*.json`, the same internal file the `@handle` uses), and `?` is a hint read from the end of each idle session's transcript, not a guarantee. Every session in the repo shows the same total, but not always the same split: a session waiting on you counts itself as `○` while the others count it as `?`, so with two idle sessions where only A asked something, A shows `[○2]` and B shows `?1 [○1]`. Each statusline also counts at its own redraw, so two sessions can briefly disagree by one; set `refreshInterval` on your `statusLine` so idle sessions redraw (60 seconds is plenty). Counts follow the directory and branch on phones. When space runs out, counts are dropped whole after Kubernetes context on wide layouts and first on phones. Only the upgrade notice stays right-aligned. Disable with `STATUSLINE_PEERS=0`.
+
+### OpenRouter sessions
+
+A session counts as an OpenRouter session only when **both** of these hold: `ANTHROPIC_BASE_URL` points at `openrouter.ai`, and a credential is present in `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`. An `OPENROUTER_API_KEY` exported on its own, or an `sk-or-` token without the base URL, does not switch the mode, because requests would still go to `api.anthropic.com`.
+
+In an OpenRouter session the claude.ai 5h/7d bars (which would belong to whichever account is logged in locally) and Claude Code's list-price cost estimate are hidden. Line 2 shows the OpenRouter key's own spend instead: `or $1.50/$10` with a bar and countdown when the key has a cap, plus today's spend on the widest tier. The numbers come from `claude-openrouter-fetch.sh`, which runs in the background (at most once a minute per key), reads the key from its standard input, and sends it only to `https://openrouter.ai/api/v1/key`. It never writes the key to disk or argv. Scratch files are created with `mktemp` inside a state directory it verifies it owns.
 
 ### Per-account usage fetcher
 

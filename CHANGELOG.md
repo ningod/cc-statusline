@@ -6,6 +6,15 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- OpenRouter session mode: when `ANTHROPIC_BASE_URL` points at `openrouter.ai` and `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` is set, line 2 shows the key's own spend/limit and today's spend (fetched in the background by `claude-openrouter-fetch.sh`) instead of the claude.ai 5h/7d bars and the list-price cost estimate. `STATUSLINE_OR=0` disables it; `STATUSLINE_OR_FETCH=0` disables the fetcher.
+- Profile badge reads `none` when there is no login (overridable with a `"none"` profiles entry).
+
+### Changed
+- The profile badge always shows the login and appends `+openrouter` (`+or` on phones) in an OpenRouter session, instead of replacing the login label. The label and color of the suffix come from an optional `"openrouter"` profiles entry.
+- A bare `OPENROUTER_API_KEY`, or an `sk-or-` token without the OpenRouter base URL, no longer counts as an OpenRouter session.
+- `install.sh`, the Homebrew formula and the Taskfile now ship `claude-openrouter-fetch.sh`.
+
 ## [v3.8.0] - 2026-10-13
 
 Opt-in context export: other local tools can read each session's context fill from a small private JSON file.

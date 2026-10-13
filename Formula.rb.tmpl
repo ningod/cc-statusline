@@ -24,7 +24,7 @@ class CcStatusline < Formula
     # fetchers read VERSION from their dir or parent for the User-Agent. A bare
     # bin symlink would break both, hence the wrapper.
     libexec.install "statusline.sh", "claude-status-fetch.sh", "claude-usage-fetch.sh",
-                    "codex-usage-fetch.sh", "gpt-credits-fetch.sh",
+                    "claude-openrouter-fetch.sh", "codex-usage-fetch.sh", "gpt-credits-fetch.sh",
                     "cc-statusline-update-fetch.sh", "cc-statusline-theme", "VERSION"
 
     (bin/"cc-statusline").write <<~SH

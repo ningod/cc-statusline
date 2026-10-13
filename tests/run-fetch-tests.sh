@@ -642,6 +642,52 @@ run_puntouched "shell text in tag"       '{"tag_name":"v9.9.9; rm -rf /"}'
 run_puntouched "trailing space in tag"   '{"tag_name":"v9.9.9 "}'
 run_puntouched "oversized component"     '{"tag_name":"v9.99999.9"}'
 
+# ── OpenRouter key budget fetcher (claude-openrouter-fetch.sh) ───────────────
+echo
+echo "openrouter budget fetcher"
+OR_FETCH="$REPO_DIR/claude-openrouter-fetch.sh"
+OR_BODY='{"data":{"usage_daily":0.25,"effective_budget":{"spend_usd":1.5,"limit_usd":10,"resets_at":"2023-11-15T00:00:00+00:00"}}}'
+
+# _or_run NAME KEY EXPECTED [HTTP]: key on stdin, fixture instead of the network
+_or_run() {
+    local name="$1" key="$2" expected="$3" http="${4:-200}"
+    local d="$SCRATCH/or-$$-$RANDOM"; mkdir -p "$d"
+    printf '%s' "$OR_BODY" > "$d/body.json"
+    printf '%s' "$key" | CC_STATUSLINE_OR_CACHE="$d/cache" CC_STATUSLINE_OR_DATA="$d/body.json" \
+        CC_STATUSLINE_OR_HTTP="$http" CC_STATUSLINE_NOW=1700000000 bash "$OR_FETCH"
+    local got=""; [ -f "$d/cache" ] && got=$(head -1 "$d/cache")
+    if [ "$got" = "$expected" ]; then printf '  PASS  %s\n' "$name"; PASS=$((PASS + 1))
+    else printf '  FAIL  %s\n        want: [%s]\n        got:  [%s]\n' "$name" "$expected" "$got"; FAIL=$((FAIL + 1)); fi
+}
+_or_run "or-fetch-writes-cents-line"          "sk-or-test"  "150|1000|1700006400|25|1700000000"
+_or_run "or-fetch-ignores-non-openrouter-key" "sk-ant-test" ""
+_or_run "or-fetch-http-error-leaves-no-cache" "sk-or-test"  "" 401
+
+# Scratch files must not be predictable: a planted symlink at the old
+# <cache>.body.<pid> path must never be followed (the target stays untouched).
+d="$SCRATCH/or-symlink"; mkdir -p "$d"; printf 'keep' > "$d/victim"
+for pid in $(seq 1 3); do ln -sf "$d/victim" "$d/cache.body.$pid"; ln -sf "$d/victim" "$d/cache.fetch.$pid"; done
+printf '%s' "sk-or-test" | CC_STATUSLINE_OR_CACHE="$d/cache" CC_STATUSLINE_OR_DATA="$SCRATCH/or-sym-body.json" \
+    CC_STATUSLINE_NOW=1700000000 bash "$OR_FETCH" 2>/dev/null
+printf '%s' "$OR_BODY" > "$SCRATCH/or-sym-body.json"
+printf '%s' "sk-or-test" | CC_STATUSLINE_OR_CACHE="$d/cache" CC_STATUSLINE_OR_DATA="$SCRATCH/or-sym-body.json" \
+    CC_STATUSLINE_NOW=1700000000 bash "$OR_FETCH" 2>/dev/null
+if [ "$(cat "$d/victim")" = "keep" ] && [ "$(head -1 "$d/cache" 2>/dev/null)" = "150|1000|1700006400|25|1700000000" ]; then
+    printf '  PASS  %s\n' "or-fetch-does-not-follow-planted-symlinks"; PASS=$((PASS + 1))
+else
+    printf '  FAIL  %s\n' "or-fetch-does-not-follow-planted-symlinks"; FAIL=$((FAIL + 1))
+fi
+
+# A cache directory that is a symlink is refused outright.
+rm -rf "$SCRATCH/or-real" "$SCRATCH/or-link"; mkdir -p "$SCRATCH/or-real"; ln -s "$SCRATCH/or-real" "$SCRATCH/or-link"
+printf '%s' "sk-or-test" | CC_STATUSLINE_OR_CACHE="$SCRATCH/or-link/cache" CC_STATUSLINE_OR_DATA="$SCRATCH/or-sym-body.json" \
+    CC_STATUSLINE_NOW=1700000000 bash "$OR_FETCH" 2>/dev/null
+if [ ! -e "$SCRATCH/or-real/cache" ]; then
+    printf '  PASS  %s\n' "or-fetch-refuses-symlinked-state-dir"; PASS=$((PASS + 1))
+else
+    printf '  FAIL  %s\n' "or-fetch-refuses-symlinked-state-dir"; FAIL=$((FAIL + 1))
+fi
+
 echo "------------------------------------------------------------"
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

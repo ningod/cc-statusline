@@ -1516,6 +1516,75 @@ phone_truncation_tests() {
     esac
 }
 
+# ── OpenRouter session mode + login badge modifier ───────────────────────────
+# An OpenRouter session is active only when ANTHROPIC_BASE_URL points at
+# openrouter.ai AND a credential rides along; a bare OPENROUTER_API_KEY (or an
+# sk-or-* token without the base URL) must not flip it. The badge always shows
+# the login and appends "+openrouter" ("+or" on the phone layout) when active.
+openrouter_badge_tests() {
+    printf '\n'
+    printf 'openrouter badge tests\n'
+    printf '%s\n' "------------------------------------------------------------"
+
+    local oh="$SCRATCH/or-home" oc="$SCRATCH/or-cache" nh="$SCRATCH/or-home-nologin"
+    mkdir -p "$oh/.claude" "$nh/.claude"
+    printf '{"oauthAccount":{"accountUuid":"11111111-2222-3333-4444-555555555555"}}\n' > "$oh/.claude.json"
+    printf '{}\n' > "$nh/.claude.json"
+    local prof='{"enabled":true,"profiles":{"11111111-2222-3333-4444-555555555555":{"label":"alpha","color":"blue"},"openrouter":{"label":"openrouter","color":"purple"}}}'
+    printf '%s\n' "$prof" > "$oh/.claude/profile-labels.json"
+    printf '%s\n' "$prof" > "$nh/.claude/profile-labels.json"
+    printf '150|1000|1700086400|20|1700000000\n' > "$oc"
+
+    # _or_l2 HOME COLUMNS [VAR=value ...] -> line 2 with ANSI stripped
+    _or_l2() {
+        local home="$1" cols="$2"; shift 2
+        ( cd "$SCRATCH" && _rl_json 15 1700009660 2 1700361000 \
+            | env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY \
+                  -u OPENROUTER_API_KEY -u CC_STATUSLINE_RL_KEY \
+                  HOME="$home" COLUMNS="$cols" STATUSLINE_PROFILE=1 STATUSLINE_RL_FETCH=0 \
+                  CC_STATUSLINE_NOW=1700000000 CC_STATUSLINE_OR_CACHE="$oc" \
+                  CC_STATUSLINE_OR_FETCH=/bin/true CC_STATUSLINE_RL_CACHE="$SCRATCH/or-rl" \
+                  XDG_CONFIG_HOME="$SCRATCH/xdg-empty" "$@" bash "$STATUSLINE" 2>/dev/null ) \
+            | sed -n '2p' | _strip_ansi
+    }
+
+    local l2 name
+    name="or-bare-key-is-not-openrouter"
+    l2=$(_or_l2 "$oh" 160 OPENROUTER_API_KEY=sk-or-test)
+    if _has "$l2" "alpha" && ! _has "$l2" "openrouter" && _has "$l2" "5h"; then _rl_pass "$name"
+    else _rl_fail "$name" "line2=[$l2]"; fi
+
+    name="or-token-without-base-url-is-not-openrouter"
+    l2=$(_or_l2 "$oh" 160 ANTHROPIC_AUTH_TOKEN=sk-or-test OPENROUTER_API_KEY=sk-or-test)
+    if _has "$l2" "alpha" && ! _has "$l2" "openrouter"; then _rl_pass "$name"
+    else _rl_fail "$name" "line2=[$l2]"; fi
+
+    name="or-base-url-without-credential-is-not-openrouter"
+    l2=$(_or_l2 "$oh" 160 ANTHROPIC_BASE_URL=https://openrouter.ai/api)
+    if _has "$l2" "alpha" && ! _has "$l2" "openrouter"; then _rl_pass "$name"
+    else _rl_fail "$name" "line2=[$l2]"; fi
+
+    name="or-active-appends-modifier-and-shows-key-budget"
+    l2=$(_or_l2 "$oh" 160 ANTHROPIC_BASE_URL=https://openrouter.ai/api ANTHROPIC_AUTH_TOKEN=sk-or-test)
+    if _has "$l2" "alpha+openrouter" && _has "$l2" '$1.50/$10' && ! _has "$l2" "5h"; then _rl_pass "$name"
+    else _rl_fail "$name" "line2=[$l2]"; fi
+
+    name="or-phone-layout-shortens-modifier"
+    l2=$(_or_l2 "$oh" 60 ANTHROPIC_BASE_URL=https://openrouter.ai/api ANTHROPIC_AUTH_TOKEN=sk-or-test)
+    if _has "$l2" "alpha+or" && ! _has "$l2" "openrouter"; then _rl_pass "$name"
+    else _rl_fail "$name" "line2=[$l2]"; fi
+
+    name="or-no-login-shows-none"
+    l2=$(_or_l2 "$nh" 160)
+    if _has "$l2" "none" && ! _has "$l2" "openrouter"; then _rl_pass "$name"
+    else _rl_fail "$name" "line2=[$l2]"; fi
+
+    name="or-no-login-active-shows-none-plus-openrouter"
+    l2=$(_or_l2 "$nh" 160 ANTHROPIC_BASE_URL=https://openrouter.ai/api ANTHROPIC_API_KEY=sk-or-test)
+    if _has "$l2" "none+openrouter"; then _rl_pass "$name"
+    else _rl_fail "$name" "line2=[$l2]"; fi
+}
+
 # ── Phone gap tests (mutation-derived) ─────────────────────────────────────
 # Each of these kills a mutant that survived the rest of the suite: the render
 # could lose the service-icon width reservation, collapse to a lower rate tier,
@@ -4031,6 +4100,7 @@ phone_truncation_tests
 phone_gap_tests
 github_status_tests
 session_name_tests
+openrouter_badge_tests
 peer_tests
 env_hardening_tests
 effort_tests
